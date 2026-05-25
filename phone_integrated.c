@@ -19,7 +19,7 @@
 #include <gtk/gtk.h>
 #include <opus/opus.h>
 
-#define SAMPLE_RATE 16000
+#define SAMPLE_RATE 44100
 #define CHANNELS 1
 #define FRAME_SIZE 320
 #define RTP_HEADER_SIZE 12
