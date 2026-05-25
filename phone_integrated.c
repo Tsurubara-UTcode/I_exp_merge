@@ -28,8 +28,8 @@
 #define JITTER_SIZE 64
 #define THRESHOLD 500
 
-#define AUDIO_COMMAND_REC  "rec -q -t raw -b 16 -e signed-integer -c 1 -r 16000 - highpass 100 lowpass 3400"
-#define AUDIO_COMMAND_PLAY "play -q -t raw -b 16 -e signed-integer -c 1 -r 16000 -"
+#define AUDIO_COMMAND_REC  "rec -q -t raw -b 16 -e signed-integer -c 1 -r 44100 - highpass 100 lowpass 3400"
+#define AUDIO_COMMAND_PLAY "play -q -t raw -b 16 -e signed-integer -c 1 -r 44100 -"
 
 #define RTP_PAYLOAD_TYPE_OPUS 111
 
