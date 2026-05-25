@@ -19,17 +19,17 @@
 #include <gtk/gtk.h>
 #include <opus/opus.h>
 
-#define SAMPLE_RATE 44100
+#define SAMPLE_RATE 48000
 #define CHANNELS 1
-#define FRAME_SIZE 882
+#define FRAME_SIZE 960
 #define RTP_HEADER_SIZE 12
 #define MAX_PACKET_SIZE 1500
-#define OPUS_MAX_BYTES 512
+#define OPUS_MAX_BYTES 4000
 #define JITTER_SIZE 64
 #define THRESHOLD 500
 
-#define AUDIO_COMMAND_REC  "rec -q -t raw -b 16 -e signed-integer -c 1 -r 44100 - highpass 100 lowpass 3400"
-#define AUDIO_COMMAND_PLAY "play -q -t raw -b 16 -e signed-integer -c 1 -r 44100 -"
+#define AUDIO_COMMAND_REC  "rec -q -t raw -b 16 -e signed-integer -c 1 -r 48000 - highpass 100 lowpass 3400"
+#define AUDIO_COMMAND_PLAY "play -q -t raw -b 16 -e signed-integer -c 1 -r 48000 -"
 
 #define RTP_PAYLOAD_TYPE_OPUS 111
 
@@ -192,6 +192,7 @@ void *send_thread(void *arg)
 
     opus_encoder_ctl(encoder, OPUS_SET_BITRATE(24000));
     opus_encoder_ctl(encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+    opus_encoder_ctl(encoder, OPUS_SET_DTX(1));
 
     FILE *rec = popen(AUDIO_COMMAND_REC, "r");
 
@@ -228,9 +229,8 @@ void *send_thread(void *arg)
             continue;
         }
 
-        if (!is_voice(pcm, FRAME_SIZE)) {
-            continue;
-        }
+        /* GUIのエネルギー表示だけ更新し、送信判定はOpus DTXに任せる */
+        is_voice(pcm, FRAME_SIZE);
 
         int opus_len =
             opus_encode(encoder,
