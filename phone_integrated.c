@@ -30,8 +30,8 @@
 #define JITTER_SIZE 64
 #define THRESHOLD 500
 
-#define AUDIO_COMMAND_REC  "rec -q -t raw -b 16 -e signed-integer -c 1 -r 48000 - highpass 100 lowpass 3400"
-#define AUDIO_COMMAND_PLAY "play -q -t raw -b 16 -e signed-integer -c 1 -r 48000 -"
+#define AUDIO_COMMAND_REC  "rec -t pulse -q -t raw -b 16 -e signed-integer -c 1 -r 48000 - highpass 100 lowpass 3400"
+#define AUDIO_COMMAND_PLAY "play -t pulse -q -t raw -b 16 -e signed-integer -c 1 -r 48000 -"
 
 #define RTP_PAYLOAD_TYPE_OPUS 111
 
@@ -169,8 +169,24 @@ int jitter_pop(JitterBuffer *jb,
         return 1;
     }
 
-    lost_packets++;
-    jb->expected_seq++;
+    /*
+     * バッファ内に他のパケットが存在するか確認する。
+     * 存在する → アクティブ受信中の真のロスト → カウントして seq を進める
+     * 存在しない → PTT無音期間など → カウントも seq も進めない
+     *   (seq を進めないことで、次の送信セッションと再同期できる)
+     */
+    int has_any = 0;
+    for (int i = 0; i < JITTER_SIZE; i++) {
+        if (jb->packets[i].used) {
+            has_any = 1;
+            break;
+        }
+    }
+
+    if (has_any) {
+        lost_packets++;
+        jb->expected_seq++;
+    }
 
     pthread_mutex_unlock(&jb->mutex);
     return 0;
@@ -510,14 +526,9 @@ void on_mute_clicked(GtkWidget *widget, gpointer data)
     muted = !muted;
 }
 
-void on_ptt_pressed(GtkWidget *widget, gpointer data)
+void on_ptt_toggled(GtkWidget *widget, gpointer data)
 {
-    ptt = 1;
-}
-
-void on_ptt_released(GtkWidget *widget, gpointer data)
-{
-    ptt = 0;
+    ptt = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget));
 }
 
 void on_destroy(GtkWidget *widget, gpointer data)
@@ -612,7 +623,7 @@ int main(int argc, char **argv)
         gtk_button_new_with_label("Mute ON/OFF");
 
     GtkWidget *button_ptt =
-        gtk_button_new_with_label("Push To Talk");
+        gtk_toggle_button_new_with_label("Push To Talk");
 
     gtk_box_pack_start(GTK_BOX(box), label_status, FALSE, FALSE, 5);
     gtk_box_pack_start(GTK_BOX(box), label_energy, FALSE, FALSE, 5);
@@ -632,13 +643,8 @@ int main(int argc, char **argv)
                      NULL);
 
     g_signal_connect(button_ptt,
-                     "pressed",
-                     G_CALLBACK(on_ptt_pressed),
-                     NULL);
-
-    g_signal_connect(button_ptt,
-                     "released",
-                     G_CALLBACK(on_ptt_released),
+                     "toggled",
+                     G_CALLBACK(on_ptt_toggled),
                      NULL);
 
     g_timeout_add(200, update_gui, NULL);
