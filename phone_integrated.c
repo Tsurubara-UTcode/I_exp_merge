@@ -10,9 +10,11 @@
 #include <signal.h>
 #include <pthread.h>
 #include <math.h>
+#include <time.h>
 #include <errno.h>
 
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -174,6 +176,30 @@ int jitter_pop(JitterBuffer *jb,
     return 0;
 }
 
+/* 指定シーケンス番号のパケットをバッファから取り出さずに読む（FEC用） */
+int jitter_peek(JitterBuffer *jb,
+                uint16_t seq,
+                unsigned char *payload,
+                int *len)
+{
+    pthread_mutex_lock(&jb->mutex);
+
+    int index = seq % JITTER_SIZE;
+
+    if (jb->packets[index].used &&
+        jb->packets[index].seq == seq) {
+
+        *len = jb->packets[index].len;
+        memcpy(payload, jb->packets[index].payload, *len);
+
+        pthread_mutex_unlock(&jb->mutex);
+        return 1;
+    }
+
+    pthread_mutex_unlock(&jb->mutex);
+    return 0;
+}
+
 void *send_thread(void *arg)
 {
     int err;
@@ -193,6 +219,8 @@ void *send_thread(void *arg)
     opus_encoder_ctl(encoder, OPUS_SET_BITRATE(24000));
     opus_encoder_ctl(encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     opus_encoder_ctl(encoder, OPUS_SET_DTX(1));
+    opus_encoder_ctl(encoder, OPUS_SET_INBAND_FEC(1));
+    opus_encoder_ctl(encoder, OPUS_SET_PACKET_LOSS_PERC(10));
 
     FILE *rec = popen(AUDIO_COMMAND_REC, "r");
 
@@ -211,6 +239,16 @@ void *send_thread(void *arg)
     uint32_t ssrc = 0x12345678;
 
     while (running) {
+        /* 100ms ごとに running を確認し、終了時に fread の永久ブロックを防ぐ */
+        fd_set rfds;
+        struct timeval tv = {0, 100000};
+        int fd = fileno(rec);
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        if (select(fd + 1, &rfds, NULL, NULL, &tv) <= 0) {
+            continue; /* タイムアウトまたはエラー → ループ先頭で running を再確認 */
+        }
+
         size_t n = fread(pcm,
                          sizeof(short),
                          FRAME_SIZE,
@@ -339,6 +377,10 @@ void *play_thread(void *arg)
 
     usleep(80000);
 
+    /* 絶対時刻ベースのタイマー初期化 */
+    struct timespec next_time;
+    clock_gettime(CLOCK_MONOTONIC, &next_time);
+
     while (running) {
         int has_packet =
             jitter_pop(&jitter,
@@ -348,6 +390,7 @@ void *play_thread(void *arg)
         int decoded;
 
         if (has_packet) {
+            /* 正常デコード */
             decoded =
                 opus_decode(decoder,
                             opus_payload,
@@ -356,13 +399,32 @@ void *play_thread(void *arg)
                             FRAME_SIZE,
                             0);
         } else {
-            decoded =
-                opus_decode(decoder,
-                            NULL,
-                            0,
-                            pcm,
-                            FRAME_SIZE,
-                            0);
+            /* ロスト: 次パケットのFECで前フレームを復元を試みる */
+            unsigned char next_payload[OPUS_MAX_BYTES];
+            int next_len;
+
+            if (jitter_peek(&jitter,
+                            jitter.expected_seq,
+                            next_payload,
+                            &next_len)) {
+                /* 次パケットのFECデータで補完（バッファは消費しない） */
+                decoded =
+                    opus_decode(decoder,
+                                next_payload,
+                                next_len,
+                                pcm,
+                                FRAME_SIZE,
+                                1);
+            } else {
+                /* 次パケットも未着: PLCにフォールバック */
+                decoded =
+                    opus_decode(decoder,
+                                NULL,
+                                0,
+                                pcm,
+                                FRAME_SIZE,
+                                0);
+            }
         }
 
         if (decoded > 0) {
@@ -381,7 +443,26 @@ void *play_thread(void *arg)
             }
         }
 
-        usleep(20000);
+        /* 絶対時刻ベースで20ms間隔を維持（処理時間のドリフトを吸収） */
+        next_time.tv_nsec += 20000000L;
+        if (next_time.tv_nsec >= 1000000000L) {
+            next_time.tv_sec  += 1;
+            next_time.tv_nsec -= 1000000000L;
+        }
+        /* macOSはclock_nanosleepが非対応のため、残り時間を計算してnanosleep */
+        {
+            struct timespec now, remaining;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            remaining.tv_sec  = next_time.tv_sec  - now.tv_sec;
+            remaining.tv_nsec = next_time.tv_nsec - now.tv_nsec;
+            if (remaining.tv_nsec < 0) {
+                remaining.tv_sec  -= 1;
+                remaining.tv_nsec += 1000000000L;
+            }
+            if (remaining.tv_sec >= 0 && remaining.tv_nsec >= 0) {
+                nanosleep(&remaining, NULL);
+            }
+        }
     }
 
     if (record) fclose(record);
@@ -566,6 +647,11 @@ int main(int argc, char **argv)
     gtk_main();
 
     running = 0;
+
+    /* スレッドが pclose() で rec/play を正常終了させてから exit する */
+    pthread_join(th_send, NULL);
+    pthread_join(th_recv, NULL);
+    pthread_join(th_play, NULL);
 
     return 0;
 }
